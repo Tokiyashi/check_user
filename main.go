@@ -1,78 +1,58 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"golang.org/x/crypto/bcrypt"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const (
-	dbURL = "postgres://youruser:yourpass@localhost:5432/yourdb" // 🔁 Заменить на свои данные
-)
+func checkSubscription(ctx context.Context, pool *pgxpool.Pool, username string) bool {
+	var isPaid bool
+	var expirationDate time.Time
 
-func main() {
-	reader := bufio.NewReader(os.Stdin)
-	username, err := reader.ReadString('\n')
+	err := pool.QueryRow(ctx, `
+		SELECT is_paid, expiration_date FROM subscriptions
+		WHERE username = $1
+	`, username).Scan(&isPaid, &expirationDate)
+
 	if err != nil {
-		os.Exit(1)
-	}
-	password, err := reader.ReadString('\n')
-	if err != nil {
-		os.Exit(1)
+		if err.Error() == "no rows in result set" {
+			// Нет подписки
+			return false
+		}
+		fmt.Println("Error querying database:", err)
+		return false
 	}
 
-	username = strings.TrimSpace(username)
-	password = strings.TrimSpace(password)
-
-	ok := checkSubscription(username, password)
-	if ok {
-		os.Exit(0)
-	} else {
-		os.Exit(1)
-	}
+	return isPaid && expirationDate.After(time.Now())
 }
 
-func checkSubscription(username, password string) bool {
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: ./check_user <username>")
+		os.Exit(1)
+	}
+
+	username := os.Args[1]
+
+	// 🔐 Настрой подключение к базе
+	dsn := "postgres://your_db_user:your_db_password@localhost:5432/your_db_name?sslmode=disable"
+
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, dbURL)
+
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DB connection error:", err)
-		return false
+		fmt.Println("Error connecting to database:", err)
+		os.Exit(1)
 	}
-	defer conn.Close(ctx)
+	defer pool.Close()
 
-	var passwordHash string
-	var subscriptionEnd time.Time
-	var isActive bool
-
-	err = conn.QueryRow(ctx, `
-		SELECT password_hash, subscription_end, is_active
-		FROM vpn_users
-		WHERE username = $1
-	`, username).Scan(&passwordHash, &subscriptionEnd, &isActive)
-
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Query error:", err)
-		return false
+	if checkSubscription(ctx, pool, username) {
+		os.Exit(0) // Успех
+	} else {
+		os.Exit(1) // Подписки нет или истекла
 	}
-
-	if !isActive {
-		return false
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
-		return false
-	}
-
-	if time.Now().After(subscriptionEnd) {
-		return false
-	}
-
-	return true
 }
